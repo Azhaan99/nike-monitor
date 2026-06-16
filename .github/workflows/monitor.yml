@@ -27,3 +27,4 @@ jobs:
           GITHUB_TOKEN:        ${{ secrets.GIST_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python monitor.py
+
