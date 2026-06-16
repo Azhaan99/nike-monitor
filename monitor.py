@@ -55,14 +55,24 @@ def save_gist(data: dict) -> None:
 
 # ── Scraper ──────────────────────────────────────────────────────────────────
 def get_count(url: str) -> int | None:
+    import re
     try:
         r = requests.get(url, headers=HEADERS, timeout=20)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         el = soup.select_one(".js-search-results__counts")
-        if el and el.has_attr("data-search-results-count"):
+        if el is None:
+            print(f"  ⚠ Count element not found on page")
+            return None
+        # Method 1: data attribute (sale/category pages)
+        if el.has_attr("data-search-results-count"):
             return int(el["data-search-results-count"])
-        print(f"  ⚠ Count element not found on page")
+        # Method 2: parse number from text e.g. "(1)" (search pages)
+        text = el.get_text(strip=True)
+        match = re.search(r"\d+", text)
+        if match:
+            return int(match.group())
+        print(f"  ⚠ Could not parse count from text: '{text}'")
         return None
     except Exception as e:
         print(f"  ⚠ Error fetching page: {e}")
