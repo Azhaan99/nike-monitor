@@ -55,11 +55,16 @@ def save_gist(data: dict) -> None:
 
 
 # ── Scraper ──────────────────────────────────────────────────────────────────
-def get_count(url: str) -> int | None:
+def get_count(url: str, debug: bool = False) -> int | None:
     try:
         r = requests.get(url, headers=HEADERS, timeout=20)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
+
+        if debug:
+            # Print first 2000 chars of raw HTML so we can see what we're getting
+            print(f"  DEBUG HTTP status: {r.status_code}")
+            print(f"  DEBUG HTML snippet:\n{r.text[:2000]}")
 
         # Method 1: data attribute on count span (sale/category pages)
         el = soup.select_one(".js-search-results__counts")
@@ -120,7 +125,9 @@ def main():
         url  = page["url"]
         print(f"\nChecking: {name}")
 
-        count = get_count(url)
+        # Enable debug only for Jordan 4 Retro
+        debug = (name == "Jordan 4 Retro")
+        count = get_count(url, debug=debug)
         if count is None:
             print(f"  Skipping — could not read count")
             continue
