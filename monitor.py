@@ -4,7 +4,6 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
-# ── Pages to monitor ────────────────────────────────────────────────────────
 PAGES = [
     {
         "name": "Jordan 4 Sale",
@@ -26,12 +25,18 @@ GITHUB_TOKEN  = os.environ["GITHUB_TOKEN"]
 DISCORD_URL   = os.environ["DISCORD_WEBHOOK_URL"]
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-AE,en;q=0.9",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-AE,en;q=0.9,ar;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+    "X-Forwarded-For": "94.200.0.1",  # UAE IP range
 }
 
 # ── Gist helpers ─────────────────────────────────────────────────────────────
@@ -46,25 +51,26 @@ def load_gist() -> dict:
 def save_gist(data: dict) -> None:
     url = f"https://api.github.com/gists/{GIST_ID}"
     payload = {"files": {GIST_FILENAME: {"content": json.dumps(data, indent=2)}}}
-    r = requests.patch(
-        url,
-        json=payload,
-        headers={"Authorization": f"token {GITHUB_TOKEN}"},
-    )
+    r = requests.patch(url, json=payload, headers={"Authorization": f"token {GITHUB_TOKEN}"})
     r.raise_for_status()
 
 
 # ── Scraper ──────────────────────────────────────────────────────────────────
-def get_count(url: str, debug: bool = False) -> int | None:
+def get_count(page: dict) -> int | None:
+    url = page["url"]
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
+        session = requests.Session()
+        # First hit the homepage to get cookies like a real browser would
+        session.get("https://www.nike.ae/en/home", headers=HEADERS, timeout=20)
+        # Now hit the actual page
+        r = session.get(url, headers=HEADERS, timeout=20)
         r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
 
-        if debug:
-            # Print first 2000 chars of raw HTML so we can see what we're getting
-            print(f"  DEBUG HTTP status: {r.status_code}")
-            print(f"  DEBUG HTML snippet:\n{r.text[:2000]}")
+        print(f"  HTTP {r.status_code}, locale in HTML: ", end="")
+        locale_match = re.search(r'data-locale="([^"]+)"', r.text)
+        print(locale_match.group(1) if locale_match else "not found")
+
+        soup = BeautifulSoup(r.text, "html.parser")
 
         # Method 1: data attribute on count span (sale/category pages)
         el = soup.select_one(".js-search-results__counts")
@@ -76,17 +82,34 @@ def get_count(url: str, debug: bool = False) -> int | None:
         if hidden and hidden.has_attr("data-products-count"):
             return int(hidden["data-products-count"])
 
-        # Method 3: parse number from count span text e.g. "(1)"
+        # Method 3: section data-products-count
+        section = soup.select_one("section.b-product-grid")
+        if section and section.has_attr("data-products-count"):
+            return int(section["data-products-count"])
+
+        # Method 4: parse text from count span
         if el:
             text = el.get_text(strip=True)
             match = re.search(r"\d+", text)
             if match:
                 return int(match.group())
 
-        print(f"  ⚠ Count element not found on page")
+        # Method 5: filters count div
+        filters_count = soup.select_one(".js-search-results-filters-count")
+        if filters_count:
+            text = filters_count.get_text(strip=True)
+            match = re.search(r"\d+", text)
+            if match:
+                return int(match.group())
+
+        print(f"  ⚠ No count found. Checking what elements exist...")
+        print(f"  in-search-show exists: {soup.select_one('input.in-search-show') is not None}")
+        print(f"  js-search-results__counts exists: {soup.select_one('.js-search-results__counts') is not None}")
+        print(f"  b-product-grid exists: {soup.select_one('section.b-product-grid') is not None}")
         return None
+
     except Exception as e:
-        print(f"  ⚠ Error fetching page: {e}")
+        print(f"  ⚠ Error: {e}")
         return None
 
 
@@ -94,16 +117,11 @@ def get_count(url: str, debug: bool = False) -> int | None:
 def send_discord(name: str, old: int, new: int, url: str) -> None:
     direction = "📈" if new > old else "📉"
     message = {
-        "embeds": [
-            {
-                "title": f"{direction} Nike.ae update — {name}",
-                "description": (
-                    f"Item count changed from **{old}** → **{new}**\n"
-                    f"[Open page]({url})"
-                ),
-                "color": 0x00A859 if new > old else 0xFF6B00,
-            }
-        ]
+        "embeds": [{
+            "title": f"{direction} Nike.ae update — {name}",
+            "description": f"Item count changed from **{old}** → **{new}**\n[Open page]({url})",
+            "color": 0x00A859 if new > old else 0xFF6B00,
+        }]
     }
     r = requests.post(DISCORD_URL, json=message, timeout=10)
     r.raise_for_status()
@@ -125,9 +143,7 @@ def main():
         url  = page["url"]
         print(f"\nChecking: {name}")
 
-        # Enable debug only for Jordan 4 Retro
-        debug = (name == "Jordan 4 Retro")
-        count = get_count(url, debug=debug)
+        count = get_count(page)
         if count is None:
             print(f"  Skipping — could not read count")
             continue
