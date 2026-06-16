@@ -10,8 +10,8 @@ PAGES = [
         "url": "https://www.nike.ae/en/sale?gs=3&pmin=0%2C01&prefn1=division&prefn2=jordan_editions&prefv1=FOOTWEAR&prefv2=jordan_4&srule=price-high-to-low&start=0&sz=24",
     },
     {
-        "name": "Jordan 4 Retro",
-        "url": "https://www.nike.ae/en/search?q=jordan%204%20retro&pmin=149,01&pmax=806,01&prefn1=division&prefv1=FOOTWEAR&prefn2=gender&prefv2=MENS&gs=3&srule=Featured_Generic",
+        "name": "Jordan 4 Retro Mens",
+        "url": "https://www.nike.ae/en/sale?prefn1=division&prefv1=FOOTWEAR&prefn2=jordan_editions&prefv2=jordan_4&prefn3=gender&prefv3=MENS&gs=3&srule=Featured_Generic",
     },
     {
         "name": "Jordan 2 3 5 6 9 10 11 12 14 Sale",
@@ -28,15 +28,8 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-AE,en;q=0.9,ar;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Cache-Control": "max-age=0",
-    "X-Forwarded-For": "94.200.0.1",  # UAE IP range
 }
 
 # ── Gist helpers ─────────────────────────────────────────────────────────────
@@ -56,20 +49,10 @@ def save_gist(data: dict) -> None:
 
 
 # ── Scraper ──────────────────────────────────────────────────────────────────
-def get_count(page: dict) -> int | None:
-    url = page["url"]
+def get_count(url: str) -> int | None:
     try:
-        session = requests.Session()
-        # First hit the homepage to get cookies like a real browser would
-        session.get("https://www.nike.ae/en/home", headers=HEADERS, timeout=20)
-        # Now hit the actual page
-        r = session.get(url, headers=HEADERS, timeout=20)
+        r = requests.get(url, headers=HEADERS, timeout=20)
         r.raise_for_status()
-
-        print(f"  HTTP {r.status_code}, locale in HTML: ", end="")
-        locale_match = re.search(r'data-locale="([^"]+)"', r.text)
-        print(locale_match.group(1) if locale_match else "not found")
-
         soup = BeautifulSoup(r.text, "html.parser")
 
         # Method 1: data attribute on count span (sale/category pages)
@@ -77,37 +60,20 @@ def get_count(page: dict) -> int | None:
         if el and el.has_attr("data-search-results-count"):
             return int(el["data-search-results-count"])
 
-        # Method 2: hidden input data-products-count (search pages)
+        # Method 2: hidden input data-products-count
         hidden = soup.select_one("input.in-search-show")
         if hidden and hidden.has_attr("data-products-count"):
             return int(hidden["data-products-count"])
 
-        # Method 3: section data-products-count
-        section = soup.select_one("section.b-product-grid")
-        if section and section.has_attr("data-products-count"):
-            return int(section["data-products-count"])
-
-        # Method 4: parse text from count span
+        # Method 3: parse number from count span text e.g. "(49)"
         if el:
             text = el.get_text(strip=True)
             match = re.search(r"\d+", text)
             if match:
                 return int(match.group())
 
-        # Method 5: filters count div
-        filters_count = soup.select_one(".js-search-results-filters-count")
-        if filters_count:
-            text = filters_count.get_text(strip=True)
-            match = re.search(r"\d+", text)
-            if match:
-                return int(match.group())
-
-        print(f"  ⚠ No count found. Checking what elements exist...")
-        print(f"  in-search-show exists: {soup.select_one('input.in-search-show') is not None}")
-        print(f"  js-search-results__counts exists: {soup.select_one('.js-search-results__counts') is not None}")
-        print(f"  b-product-grid exists: {soup.select_one('section.b-product-grid') is not None}")
+        print(f"  ⚠ Count element not found on page")
         return None
-
     except Exception as e:
         print(f"  ⚠ Error: {e}")
         return None
@@ -133,7 +99,7 @@ def main():
     try:
         previous = load_gist()
     except Exception as e:
-        print(f"Could not load Gist (first run?): {e}")
+        print(f"Could not load Gist: {e}")
         previous = {}
 
     updated = dict(previous)
@@ -143,7 +109,7 @@ def main():
         url  = page["url"]
         print(f"\nChecking: {name}")
 
-        count = get_count(page)
+        count = get_count(url)
         if count is None:
             print(f"  Skipping — could not read count")
             continue
