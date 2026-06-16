@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import requests
 from bs4 import BeautifulSoup
 
@@ -55,24 +56,29 @@ def save_gist(data: dict) -> None:
 
 # ── Scraper ──────────────────────────────────────────────────────────────────
 def get_count(url: str) -> int | None:
-    import re
     try:
         r = requests.get(url, headers=HEADERS, timeout=20)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
+
+        # Method 1: data attribute on count span (sale/category pages)
         el = soup.select_one(".js-search-results__counts")
-        if el is None:
-            print(f"  ⚠ Count element not found on page")
-            return None
-        # Method 1: data attribute (sale/category pages)
-        if el.has_attr("data-search-results-count"):
+        if el and el.has_attr("data-search-results-count"):
             return int(el["data-search-results-count"])
-        # Method 2: parse number from text e.g. "(1)" (search pages)
-        text = el.get_text(strip=True)
-        match = re.search(r"\d+", text)
-        if match:
-            return int(match.group())
-        print(f"  ⚠ Could not parse count from text: '{text}'")
+
+        # Method 2: hidden input data-products-count (search pages)
+        hidden = soup.select_one("input.in-search-show")
+        if hidden and hidden.has_attr("data-products-count"):
+            return int(hidden["data-products-count"])
+
+        # Method 3: parse number from count span text e.g. "(1)"
+        if el:
+            text = el.get_text(strip=True)
+            match = re.search(r"\d+", text)
+            if match:
+                return int(match.group())
+
+        print(f"  ⚠ Count element not found on page")
         return None
     except Exception as e:
         print(f"  ⚠ Error fetching page: {e}")
