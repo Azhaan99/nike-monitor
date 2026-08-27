@@ -4,6 +4,9 @@ import re
 import requests
 from bs4 import BeautifulSoup
 
+# Each page can set "mode":
+#   "total"     (default) — tracks the total product count on the page
+#   "available"           — tracks only items NOT marked "Sold Out"
 PAGES = [
     {
         "name": "Jordan 4 Sale",
@@ -16,6 +19,11 @@ PAGES = [
     {
         "name": "Jordan 2 3 5 6 9 10 11 12 14 Sale",
         "url": "https://www.nike.ae/en/sale?pmin=0,01&prefn1=division&prefv1=FOOTWEAR&prefn2=jordan_editions&prefv2=jordan_14|jordan_3|Jordan_5|Jordan_6|Jordan_12|jordan_9|jordan_11|jordan_10&prefn3=nikeBrands&prefv3=jordan&gs=3&srule=latest-products",
+    },
+    {
+        "name": "Nike Mind (available)",
+        "url": "https://www.nike.ae/en/trends/nike-mind?pmin=0,01&prefn1=division&prefv1=FOOTWEAR&gs=3&srule=Featured_Generic",
+        "mode": "available",
     },
 ]
 
@@ -48,44 +56,98 @@ def save_gist(data: dict) -> None:
     r.raise_for_status()
 
 
-# ── Scraper ──────────────────────────────────────────────────────────────────
-def get_count(url: str) -> int | None:
+# ── Fetch ────────────────────────────────────────────────────────────────────
+def fetch_soup(url: str):
+    r = requests.get(url, headers=HEADERS, timeout=20)
+    r.raise_for_status()
+    return BeautifulSoup(r.text, "html.parser"), r.text
+
+
+# ── Total count (unchanged logic) ────────────────────────────────────────────
+def get_total_count(soup) -> int | None:
+    el = soup.select_one(".js-search-results__counts")
+    if el:
+        # Sale/category pages: count is in data attribute
+        if el.has_attr("data-search-results-count"):
+            return int(el["data-search-results-count"])
+        # Search pages: count is in text e.g. "(1)" with only data-keyword attribute
+        if el.has_attr("data-keyword"):
+            text = el.get_text(strip=True)  # "(1)"
+            match = re.search(r"\d+", text)
+            if match:
+                return int(match.group())
+
+    # Fallback: hidden input
+    hidden = soup.select_one("input.in-search-show")
+    if hidden and hidden.has_attr("data-products-count"):
+        return int(hidden["data-products-count"])
+
+    return None
+
+
+# ── Available count (items NOT marked "Sold Out") ────────────────────────────
+def get_available_count(soup, html: str) -> int | None:
+    total = get_total_count(soup)  # for logging / sanity only
+
+    # Strategy 1 — schema.org availability microdata (most reliable if present)
+    avail_nodes = soup.find_all(attrs={"itemprop": "availability"})
+    if len(avail_nodes) >= 2:
+        out = 0
+        for n in avail_nodes:
+            val = (n.get("content") or n.get("href") or n.get_text() or "").lower()
+            if "outofstock" in val or "out_of_stock" in val or "soldout" in val:
+                out += 1
+        available = len(avail_nodes) - out
+        print(f"    [schema.org] total={total} items={len(avail_nodes)} soldout={out} available={available}")
+        return available
+
+    # Strategy 2 — product tiles via data-pid, check each tile's text for "sold out"
+    pid_map = {}
+    for el in soup.select("[data-pid]"):
+        pid = el.get("data-pid")
+        if pid and pid not in pid_map:
+            pid_map[pid] = el
+    if pid_map:
+        sold = 0
+        for pid, el in pid_map.items():
+            text = el.get_text(separator=" ", strip=True).lower()
+            if "sold out" in text:
+                sold += 1
+        available = len(pid_map) - sold
+        print(f"    [data-pid] total={total} tiles={len(pid_map)} soldout={sold} available={available}")
+        return available
+
+    # Strategy 3 — fallback: total minus count of "sold out" text occurrences
+    if total is not None:
+        sold = len(re.findall(r"sold\s*out", html, re.IGNORECASE))
+        available = max(total - sold, 0)
+        print(f"    [fallback] total={total} soldout_strings={sold} available={available}")
+        return available
+
+    print("    ⚠ Could not determine availability")
+    return None
+
+
+def get_count_for_page(page) -> int | None:
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        el = soup.select_one(".js-search-results__counts")
-        if el:
-            # Sale/category pages: count is in data attribute
-            if el.has_attr("data-search-results-count"):
-                return int(el["data-search-results-count"])
-            # Search pages: count is in text e.g. "(1)" with only data-keyword attribute
-            if el.has_attr("data-keyword"):
-                text = el.get_text(strip=True)  # "(1)"
-                match = re.search(r"\d+", text)
-                if match:
-                    return int(match.group())
-
-        # Fallback: hidden input
-        hidden = soup.select_one("input.in-search-show")
-        if hidden and hidden.has_attr("data-products-count"):
-            return int(hidden["data-products-count"])
-
-        print(f"  ⚠ Count element not found on page")
-        return None
+        soup, html = fetch_soup(page["url"])
     except Exception as e:
-        print(f"  ⚠ Error: {e}")
+        print(f"  ⚠ Fetch error: {e}")
         return None
+
+    mode = page.get("mode", "total")
+    if mode == "available":
+        return get_available_count(soup, html)
+    return get_total_count(soup)
 
 
 # ── Discord ──────────────────────────────────────────────────────────────────
-def send_discord(name: str, old: int, new: int, url: str) -> None:
+def send_discord(name: str, old: int, new: int, url: str, label: str = "Item count") -> None:
     direction = "📈" if new > old else "📉"
     message = {
         "embeds": [{
             "title": f"{direction} Nike.ae update — {name}",
-            "description": f"Item count changed from **{old}** → **{new}**\n[Open page]({url})",
+            "description": f"{label} changed from **{old}** → **{new}**\n[Open page]({url})",
             "color": 0x00A859 if new > old else 0xFF6B00,
         }]
     }
@@ -107,14 +169,16 @@ def main():
     for page in PAGES:
         name = page["name"]
         url  = page["url"]
-        print(f"\nChecking: {name}")
+        mode = page.get("mode", "total")
+        label = "Available items" if mode == "available" else "Item count"
+        print(f"\nChecking: {name}  (mode: {mode})")
 
-        count = get_count(url)
+        count = get_count_for_page(page)
         if count is None:
             print(f"  Skipping — could not read count")
             continue
 
-        print(f"  Current count: {count}")
+        print(f"  Current {label.lower()}: {count}")
         old_count = previous.get(name)
 
         if old_count is None:
@@ -123,7 +187,7 @@ def main():
         elif count != old_count:
             print(f"  Change detected: {old_count} → {count} — sending Discord ping")
             try:
-                send_discord(name, old_count, count, url)
+                send_discord(name, old_count, count, url, label=label)
                 print(f"  ✓ Discord notified")
             except Exception as e:
                 print(f"  ✗ Discord failed: {e}")
